@@ -67,6 +67,18 @@ Right click the tray icon to open the menu:
 
 The flyout also closes when it loses focus, when you press `Esc`, or when the mouse leaves the panel.
 
+## Start with Windows
+
+Use `Start with Windows` in the tray menu if you want the widget to open when you sign in.
+
+The setting is stored for the current Windows user under:
+
+```text
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+```
+
+It does not need administrator permissions. Turn the same menu item off to remove the startup entry.
+
 ## Configuration
 
 By default, the widget looks for Codex in this order:
