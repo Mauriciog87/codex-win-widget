@@ -796,6 +796,7 @@ fn paint_flyout(hwnd: HWND, snapshot: &WidgetSnapshot) {
     let title_font = create_font(15, FW_BOLD.0 as i32);
     let subtitle_font = create_font(12, FW_NORMAL.0 as i32);
     let value_font = create_font(36, FW_BOLD.0 as i32);
+    let weekly_font = create_font(24, FW_BOLD.0 as i32);
     let label_font = create_font(12, FW_NORMAL.0 as i32);
 
     let card = RECT {
@@ -828,6 +829,44 @@ fn paint_flyout(hwnd: HWND, snapshot: &WidgetSnapshot) {
         subtitle_font,
         text_spec(&view.subtitle, 46, 45, 270, 22, rgb(207, 207, 207), DT_LEFT),
     );
+    let weekly_card = RECT {
+        left: 190,
+        top: 48,
+        right: FLYOUT_WIDTH - 24,
+        bottom: 116,
+    };
+    draw_round_rect(hdc, weekly_card, rgb(42, 42, 42), rgb(66, 66, 66), 8);
+    draw_text(
+        hdc,
+        label_font,
+        text_spec("Week", 206, 54, 120, 18, rgb(210, 210, 210), DT_LEFT),
+    );
+    draw_text(
+        hdc,
+        weekly_font,
+        text_spec(
+            &view.weekly_value,
+            206,
+            70,
+            100,
+            30,
+            rgb(255, 255, 255),
+            DT_LEFT,
+        ),
+    );
+    draw_text(
+        hdc,
+        label_font,
+        text_spec(
+            &view.weekly_label,
+            206,
+            96,
+            124,
+            18,
+            rgb(202, 202, 202),
+            DT_LEFT,
+        ),
+    );
     draw_text(
         hdc,
         value_font,
@@ -846,10 +885,10 @@ fn paint_flyout(hwnd: HWND, snapshot: &WidgetSnapshot) {
         label_font,
         text_spec(
             &view.primary_label,
-            176,
-            88,
-            130,
-            24,
+            38,
+            104,
+            120,
+            18,
             rgb(202, 202, 202),
             DT_LEFT,
         ),
@@ -914,6 +953,7 @@ fn paint_flyout(hwnd: HWND, snapshot: &WidgetSnapshot) {
         let _ = DeleteObject(title_font.into());
         let _ = DeleteObject(subtitle_font.into());
         let _ = DeleteObject(value_font.into());
+        let _ = DeleteObject(weekly_font.into());
         let _ = DeleteObject(label_font.into());
         let _ = EndPaint(hwnd, &ps);
     }

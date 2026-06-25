@@ -67,6 +67,8 @@ pub struct CodexCardView {
     pub subtitle: String,
     pub primary_value: String,
     pub primary_label: String,
+    pub weekly_value: String,
+    pub weekly_label: String,
     pub remaining_label: String,
     pub reset_label: String,
     pub credits_label: String,
@@ -268,6 +270,8 @@ impl WidgetSnapshot {
                 subtitle: "Limits not available".to_string(),
                 primary_value: "--".to_string(),
                 primary_label: "remaining".to_string(),
+                weekly_value: "--".to_string(),
+                weekly_label: "weekly remaining".to_string(),
                 remaining_label: "Used not available".to_string(),
                 reset_label: "Reset time unknown".to_string(),
                 credits_label: "Credits not available".to_string(),
@@ -290,6 +294,8 @@ impl WidgetSnapshot {
                 subtitle: plan,
                 primary_value: "--".to_string(),
                 primary_label: "remaining".to_string(),
+                weekly_value: "--".to_string(),
+                weekly_label: "weekly remaining".to_string(),
                 remaining_label: "Used not available".to_string(),
                 reset_label: "Reset time unknown".to_string(),
                 credits_label: "Credits not available".to_string(),
@@ -310,6 +316,8 @@ impl WidgetSnapshot {
                 subtitle: format!("{plan} - {}", bucket.display_name()),
                 primary_value: "--".to_string(),
                 primary_label: "remaining".to_string(),
+                weekly_value: "--".to_string(),
+                weekly_label: "weekly remaining".to_string(),
                 remaining_label: "Used not available".to_string(),
                 reset_label: "Reset time unknown".to_string(),
                 credits_label: bucket
@@ -339,12 +347,23 @@ impl WidgetSnapshot {
             .rate_limit_reached_type
             .as_ref()
             .map(|value| format!("Limit reached: {value}"));
+        let weekly_value = bucket
+            .weekly_window()
+            .map(|weekly| {
+                format!(
+                    "{:.0}%",
+                    (100.0 - weekly.used_percent.clamp(0.0, 100.0)).clamp(0.0, 100.0)
+                )
+            })
+            .unwrap_or_else(|| "--".to_string());
 
         CodexCardView {
             title: "Codex".to_string(),
             subtitle: format!("{plan} - {}", bucket.display_name()),
             primary_value: format!("{remaining:.0}%"),
             primary_label: "remaining".to_string(),
+            weekly_value,
+            weekly_label: "weekly remaining".to_string(),
             remaining_label: format!("{used:.0}% used"),
             reset_label: reset,
             credits_label: bucket
@@ -396,6 +415,15 @@ impl WidgetSnapshot {
 impl RateLimitBucket {
     pub fn display_window(&self) -> Option<&LimitWindow> {
         self.primary.as_ref().or(self.secondary.as_ref())
+    }
+
+    pub fn weekly_window(&self) -> Option<&LimitWindow> {
+        const WEEKLY_WINDOW_MINS: u64 = 7 * 24 * 60;
+        [self.primary.as_ref(), self.secondary.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|window| window.window_duration_mins.unwrap_or(0) >= WEEKLY_WINDOW_MINS)
+            .max_by_key(|window| window.window_duration_mins.unwrap_or(0))
     }
 
     pub fn display_name(&self) -> String {
@@ -508,6 +536,11 @@ mod tests {
     #[test]
     fn builds_card_view_from_limit_data() {
         let mut snapshot = snapshot_with_percent(31.4);
+        snapshot.buckets[0].secondary = Some(LimitWindow {
+            used_percent: 9.4,
+            window_duration_mins: Some(10_080),
+            resets_at: None,
+        });
         snapshot.buckets[0].credits = Some(CreditsInfo {
             has_credits: Some(true),
             unlimited: Some(false),
@@ -528,6 +561,8 @@ mod tests {
         assert_eq!(view.subtitle, "plus - codex");
         assert_eq!(view.primary_value, "69%");
         assert_eq!(view.primary_label, "remaining");
+        assert_eq!(view.weekly_value, "91%");
+        assert_eq!(view.weekly_label, "weekly remaining");
         assert_eq!(view.remaining_label, "31% used");
         assert_eq!(view.credits_label, "Credits 123.45");
         assert_eq!(
@@ -550,6 +585,7 @@ mod tests {
         assert_eq!(view.subtitle, "Limits not available");
         assert_eq!(view.primary_value, "--");
         assert_eq!(view.primary_label, "remaining");
+        assert_eq!(view.weekly_value, "--");
         assert_eq!(view.status_message, Some("offline".to_string()));
         assert_eq!(view.progress_percent, 0.0);
         assert_eq!(view.status_level, StatusLevel::Error);
