@@ -2,10 +2,12 @@ use crate::app_server::CodexAppServerClient;
 use crate::model::{StatusLevel, WidgetSnapshot};
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
-    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    COLORREF, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
+    RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET,
@@ -19,6 +21,10 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -39,7 +45,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
     WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW, WS_BORDER, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WNDCLASSW, WS_BORDER, WS_OVERLAPPEDWINDOW, WS_POPUP, MF_CHECKED, MF_STRING, MF_UNCHECKED,
 };
 use windows::core::{GUID, PCWSTR, Result, w};
 
@@ -52,11 +58,14 @@ const MENU_OPEN_PANEL: u16 = 1001;
 const MENU_REFRESH: u16 = 1002;
 const MENU_OPEN_CODEX: u16 = 1003;
 const MENU_COPY_STATUS: u16 = 1004;
-const MENU_EXIT: u16 = 1005;
+const MENU_START_WITH_WINDOWS: u16 = 1005;
+const MENU_EXIT: u16 = 1006;
 const ICON_SIZE: i32 = 32;
 const FLYOUT_WIDTH: i32 = 360;
 const FLYOUT_HEIGHT: i32 = 216;
 const REFRESH_CACHE_TTL: Duration = Duration::from_secs(60);
+const STARTUP_VALUE_NAME: &str = "CodexWinWidget";
+const STARTUP_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const TRAY_GUID: GUID = GUID::from_u128(0x8f21bb2e_4b80_4cf6_b4d5_201f44b9f247);
 
 pub fn run() -> Result<()> {
@@ -383,6 +392,12 @@ impl AppState {
             append_menu_item(menu, MENU_REFRESH, "Refresh now");
             append_menu_item(menu, MENU_OPEN_CODEX, "Open Codex");
             append_menu_item(menu, MENU_COPY_STATUS, "Copy status");
+            append_checked_menu_item(
+                menu,
+                MENU_START_WITH_WINDOWS,
+                "Start with Windows",
+                startup_enabled(),
+            );
             append_menu_item(menu, MENU_EXIT, "Quit");
             let mut point = POINT::default();
             let _ = GetCursorPos(&mut point);
@@ -406,6 +421,9 @@ impl AppState {
             MENU_REFRESH => self.request_refresh_now(),
             MENU_OPEN_CODEX => open_url("https://chatgpt.com/codex"),
             MENU_COPY_STATUS => copy_to_clipboard(self.hwnd, &self.snapshot.status_summary()),
+            MENU_START_WITH_WINDOWS => {
+                let _ = set_startup_enabled(!startup_enabled());
+            }
             MENU_EXIT => unsafe {
                 let _ = DestroyWindow(self.hwnd);
             },
@@ -1029,9 +1047,17 @@ fn draw_text(hdc: HDC, font: HFONT, spec: TextSpec<'_>) {
 unsafe fn append_menu_item(menu: HMENU, id: u16, text: &str) {
     let wide = wide_null(text);
     unsafe {
+        let _ = AppendMenuW(menu, MF_STRING, id as usize, PCWSTR(wide.as_ptr()));
+    }
+}
+
+unsafe fn append_checked_menu_item(menu: HMENU, id: u16, text: &str, checked: bool) {
+    let wide = wide_null(text);
+    let checked_flag = if checked { MF_CHECKED } else { MF_UNCHECKED };
+    unsafe {
         let _ = AppendMenuW(
             menu,
-            windows::Win32::UI::WindowsAndMessaging::MF_STRING,
+            MF_STRING | checked_flag,
             id as usize,
             PCWSTR(wide.as_ptr()),
         );
@@ -1050,6 +1076,114 @@ fn open_url(url: &str) {
             SW_SHOWNA,
         );
     }
+}
+
+struct RegistryKey(HKEY);
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = RegCloseKey(self.0);
+        }
+    }
+}
+
+fn startup_enabled() -> bool {
+    let Some(key) = open_startup_key(KEY_QUERY_VALUE) else {
+        return false;
+    };
+    let name = wide_null(STARTUP_VALUE_NAME);
+    unsafe { RegQueryValueExW(key.0, PCWSTR(name.as_ptr()), None, None, None, None) }
+        == ERROR_SUCCESS
+}
+
+fn set_startup_enabled(enabled: bool) -> bool {
+    if enabled {
+        enable_startup()
+    } else {
+        disable_startup()
+    }
+}
+
+fn enable_startup() -> bool {
+    let Some(command) = startup_command() else {
+        return false;
+    };
+    if command.encode_utf16().count() > 260 {
+        return false;
+    }
+    let Some(key) = create_startup_key() else {
+        return false;
+    };
+    let name = wide_null(STARTUP_VALUE_NAME);
+    let command = wide_null(&command);
+    let bytes = wide_bytes(&command);
+    unsafe {
+        RegSetValueExW(
+            key.0,
+            PCWSTR(name.as_ptr()),
+            None,
+            REG_SZ,
+            Some(bytes),
+        )
+    } == ERROR_SUCCESS
+}
+
+fn disable_startup() -> bool {
+    let Some(key) = open_startup_key(KEY_SET_VALUE) else {
+        return true;
+    };
+    let name = wide_null(STARTUP_VALUE_NAME);
+    let result = unsafe { RegDeleteValueW(key.0, PCWSTR(name.as_ptr())) };
+    result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND
+}
+
+fn open_startup_key(access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Option<RegistryKey> {
+    let mut key = HKEY::default();
+    let subkey = wide_null(STARTUP_RUN_KEY);
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            None,
+            access,
+            &mut key,
+        )
+    };
+    (result == ERROR_SUCCESS).then_some(RegistryKey(key))
+}
+
+fn create_startup_key() -> Option<RegistryKey> {
+    let mut key = HKEY::default();
+    let subkey = wide_null(STARTUP_RUN_KEY);
+    let result = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None,
+            &mut key,
+            None,
+        )
+    };
+    (result == ERROR_SUCCESS).then_some(RegistryKey(key))
+}
+
+fn startup_command() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|path| format_startup_command(&path))
+}
+
+fn format_startup_command(path: &Path) -> String {
+    format!("\"{}\"", path.display())
+}
+
+fn wide_bytes(value: &[u16]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(value.as_ptr() as *const u8, std::mem::size_of_val(value)) }
 }
 
 fn copy_to_clipboard(hwnd: HWND, text: &str) {
@@ -1144,5 +1278,15 @@ mod tests {
             })
         );
         assert_eq!(tray_anchor_from_wparam(WPARAM(1)), None);
+    }
+
+    #[test]
+    fn quotes_startup_command_path() {
+        assert_eq!(
+            format_startup_command(Path::new(
+                r"C:\Program Files\Codex Widget\codex-win-widget.exe"
+            )),
+            r#""C:\Program Files\Codex Widget\codex-win-widget.exe""#
+        );
     }
 }

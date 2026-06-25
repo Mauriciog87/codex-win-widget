@@ -62,6 +62,7 @@ Right click the tray icon to open the menu:
 - `Refresh now` forces a fresh Codex read.
 - `Open Codex` opens Codex in the browser.
 - `Copy status` copies a short status summary to the clipboard.
+- `Start with Windows` turns launch-at-login on or off for the current user.
 - `Quit` exits the app.
 
 The flyout also closes when it loses focus, when you press `Esc`, or when the mouse leaves the panel.
