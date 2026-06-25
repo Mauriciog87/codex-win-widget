@@ -22,8 +22,8 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegCreateKeyW,
+    RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{
@@ -38,14 +38,14 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CalculatePopupWindowPosition, CreateIcon,
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, HMENU, IDC_ARROW, LoadCursorW, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_HIDE, SW_SHOW,
-    SW_SHOWNA, SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_WORKAREA, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
-    WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW, WS_BORDER, WS_OVERLAPPEDWINDOW, WS_POPUP, MF_CHECKED, MF_STRING, MF_UNCHECKED,
+    DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, HMENU, IDC_ARROW, LoadCursorW,
+    MF_CHECKED, MF_STRING, MF_UNCHECKED, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SW_HIDE, SW_SHOW, SW_SHOWNA, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_WORKAREA,
+    TRACK_POPUP_MENU_FLAGS, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP,
+    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 use windows::core::{GUID, PCWSTR, Result, w};
 
@@ -252,12 +252,11 @@ impl AppState {
         if self.refresh_inflight {
             return;
         }
-        if !force {
-            if let Some(last_refresh_at) = self.last_refresh_at {
-                if last_refresh_at.elapsed() < REFRESH_CACHE_TTL {
-                    return;
-                }
-            }
+        if !force
+            && let Some(last_refresh_at) = self.last_refresh_at
+            && last_refresh_at.elapsed() < REFRESH_CACHE_TTL
+        {
+            return;
         }
         self.refresh_inflight = true;
         let hwnd_value = self.hwnd.0 as isize;
@@ -1093,8 +1092,8 @@ fn startup_enabled() -> bool {
         return false;
     };
     let name = wide_null(STARTUP_VALUE_NAME);
-    unsafe { RegQueryValueExW(key.0, PCWSTR(name.as_ptr()), None, None, None, None) }
-        == ERROR_SUCCESS
+    let result = unsafe { RegQueryValueExW(key.0, PCWSTR(name.as_ptr()), None, None, None, None) };
+    result == ERROR_SUCCESS
 }
 
 fn set_startup_enabled(enabled: bool) -> bool {
@@ -1118,15 +1117,8 @@ fn enable_startup() -> bool {
     let name = wide_null(STARTUP_VALUE_NAME);
     let command = wide_null(&command);
     let bytes = wide_bytes(&command);
-    unsafe {
-        RegSetValueExW(
-            key.0,
-            PCWSTR(name.as_ptr()),
-            None,
-            REG_SZ,
-            Some(bytes),
-        )
-    } == ERROR_SUCCESS
+    let result = unsafe { RegSetValueExW(key.0, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes)) };
+    result == ERROR_SUCCESS
 }
 
 fn disable_startup() -> bool {
@@ -1138,7 +1130,9 @@ fn disable_startup() -> bool {
     result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND
 }
 
-fn open_startup_key(access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Option<RegistryKey> {
+fn open_startup_key(
+    access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+) -> Option<RegistryKey> {
     let mut key = HKEY::default();
     let subkey = wide_null(STARTUP_RUN_KEY);
     let result = unsafe {
@@ -1156,19 +1150,7 @@ fn open_startup_key(access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> 
 fn create_startup_key() -> Option<RegistryKey> {
     let mut key = HKEY::default();
     let subkey = wide_null(STARTUP_RUN_KEY);
-    let result = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(subkey.as_ptr()),
-            None,
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_SET_VALUE,
-            None,
-            &mut key,
-            None,
-        )
-    };
+    let result = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), &mut key) };
     (result == ERROR_SUCCESS).then_some(RegistryKey(key))
 }
 

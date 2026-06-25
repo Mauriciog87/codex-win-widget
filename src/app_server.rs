@@ -170,10 +170,10 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn command_from_codex_path(path: PathBuf) -> AppServerCommand {
-    if is_cmd_path(&path) {
-        if let Some(command) = node_command_from_codex_cmd(&path) {
-            return command;
-        }
+    if is_cmd_path(&path)
+        && let Some(command) = node_command_from_codex_cmd(&path)
+    {
+        return command;
     }
     AppServerCommand::direct(path)
 }
