@@ -6,11 +6,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -21,6 +21,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 pub enum AppServerError {
     #[error("Codex command was not found on PATH")]
     CodexNotFound,
+    #[error("Node.js was not found on PATH")]
+    NodeNotFound,
+    #[error(
+        "Codex wrapper scripts cannot be launched directly: {0}. Set CODEX_WIN_WIDGET_CODEX to codex.js or codex.exe."
+    )]
+    UnsupportedWrapper(String),
     #[error("Could not start Codex app-server: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("Could not send request to Codex app-server: {0}")]
@@ -46,6 +52,7 @@ pub enum AppServerError {
 #[derive(Debug, Clone)]
 pub struct CodexAppServerClient {
     command_override: Option<PathBuf>,
+    resolved_command: Arc<Mutex<Option<AppServerCommand>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +74,7 @@ impl CodexAppServerClient {
     pub fn new() -> Self {
         Self {
             command_override: env::var_os("CODEX_WIN_WIDGET_CODEX").map(PathBuf::from),
+            resolved_command: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -139,15 +147,34 @@ impl CodexAppServerClient {
     }
 
     fn resolve_codex_command(&self) -> Result<AppServerCommand, AppServerError> {
-        if let Some(path) = &self.command_override {
-            return Ok(command_from_codex_path(path.clone()));
+        if let Ok(guard) = self.resolved_command.lock()
+            && let Some(command) = guard.as_ref()
+        {
+            return Ok(command.clone());
         }
 
-        find_on_path("codex.cmd")
-            .map(command_from_codex_path)
-            .or_else(|| find_on_path("codex.exe").map(AppServerCommand::direct))
-            .or_else(|| find_on_path("codex").map(AppServerCommand::direct))
-            .ok_or(AppServerError::CodexNotFound)
+        let command = self.resolve_codex_command_uncached()?;
+        if let Ok(mut guard) = self.resolved_command.lock() {
+            *guard = Some(command.clone());
+        }
+        Ok(command)
+    }
+
+    fn resolve_codex_command_uncached(&self) -> Result<AppServerCommand, AppServerError> {
+        if let Some(path) = &self.command_override {
+            return command_from_codex_path(path.clone());
+        }
+
+        if let Some(path) = find_on_path("codex.cmd") {
+            return command_from_codex_path(path);
+        }
+        if let Some(path) = find_on_path("codex.exe") {
+            return command_from_codex_path(path);
+        }
+        if let Some(path) = find_on_path("codex") {
+            return command_from_codex_path(path);
+        }
+        Err(AppServerError::CodexNotFound)
     }
 }
 
@@ -158,34 +185,89 @@ impl Default for CodexAppServerClient {
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
-    let output = Command::new("where.exe").arg(name).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(PathBuf::from)
+    let path = env::var_os("PATH")?;
+    let pathext = env::var_os("PATHEXT");
+    find_on_path_in(name, env::split_paths(&path), pathext.as_deref())
 }
 
-fn command_from_codex_path(path: PathBuf) -> AppServerCommand {
-    if is_cmd_path(&path)
-        && let Some(command) = node_command_from_codex_cmd(&path)
-    {
-        return command;
+fn find_on_path_in<I>(name: &str, directories: I, pathext: Option<&OsStr>) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let candidates = executable_candidates(name, pathext);
+    for directory in directories {
+        for candidate in &candidates {
+            let path = directory.join(Path::new(candidate));
+            if path.is_file() {
+                return Some(path);
+            }
+        }
     }
-    AppServerCommand::direct(path)
+    None
+}
+
+fn executable_candidates(name: &str, pathext: Option<&OsStr>) -> Vec<OsString> {
+    if Path::new(name).extension().is_some() {
+        return vec![OsString::from(name)];
+    }
+
+    let mut candidates = vec![OsString::from(name)];
+    let extensions = pathext
+        .and_then(OsStr::to_str)
+        .unwrap_or(".COM;.EXE;.BAT;.CMD");
+    candidates.extend(
+        extensions
+            .split(';')
+            .map(str::trim)
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| {
+                let mut candidate = OsString::from(name);
+                candidate.push(extension);
+                candidate
+            }),
+    );
+    candidates
+}
+
+fn command_from_codex_path(path: PathBuf) -> Result<AppServerCommand, AppServerError> {
+    if is_cmd_path(&path) {
+        return node_command_from_codex_cmd(&path);
+    }
+    if is_js_path(&path) {
+        return node_command_from_js(path);
+    }
+    if is_wrapper_path(&path) {
+        return Err(AppServerError::UnsupportedWrapper(
+            path.display().to_string(),
+        ));
+    }
+    Ok(AppServerCommand::direct(path))
 }
 
 fn is_cmd_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
+    has_extension(path, "cmd")
 }
 
-fn node_command_from_codex_cmd(path: &Path) -> Option<AppServerCommand> {
-    let directory = path.parent()?;
+fn is_js_path(path: &Path) -> bool {
+    has_extension(path, "js")
+}
+
+fn is_wrapper_path(path: &Path) -> bool {
+    is_cmd_path(path) || has_extension(path, "bat") || has_extension(path, "ps1")
+}
+
+fn has_extension(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn node_command_from_codex_cmd(path: &Path) -> Result<AppServerCommand, AppServerError> {
+    let Some(directory) = path.parent() else {
+        return Err(AppServerError::UnsupportedWrapper(
+            path.display().to_string(),
+        ));
+    };
     let script = directory
         .join("node_modules")
         .join("@openai")
@@ -193,20 +275,36 @@ fn node_command_from_codex_cmd(path: &Path) -> Option<AppServerCommand> {
         .join("bin")
         .join("codex.js");
     if !script.is_file() {
-        return None;
+        return Err(AppServerError::UnsupportedWrapper(
+            path.display().to_string(),
+        ));
     }
 
     let local_node = directory.join("node.exe");
     let node = if local_node.is_file() {
         local_node
     } else {
-        find_on_path("node.exe").or_else(|| find_on_path("node"))?
+        find_node_command().ok_or(AppServerError::NodeNotFound)?
     };
 
-    Some(AppServerCommand {
+    Ok(AppServerCommand {
         program: node,
         args: vec![script.into_os_string()],
     })
+}
+
+fn node_command_from_js(script: PathBuf) -> Result<AppServerCommand, AppServerError> {
+    let node = find_node_command().ok_or(AppServerError::NodeNotFound)?;
+    Ok(AppServerCommand {
+        program: node,
+        args: vec![script.into_os_string()],
+    })
+}
+
+fn find_node_command() -> Option<PathBuf> {
+    find_on_path("node.exe")
+        .or_else(|| find_on_path("node"))
+        .filter(|path| !is_wrapper_path(path))
 }
 
 fn spawn_app_server(command: &AppServerCommand) -> Result<Child, AppServerError> {
@@ -580,28 +678,112 @@ mod tests {
 
     #[test]
     fn resolves_codex_cmd_to_node_script() -> Result<(), Box<dyn std::error::Error>> {
-        let root =
-            std::env::temp_dir().join(format!("codex-win-widget-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = test_root("codex-cmd");
+        let (cmd, node, script) = create_codex_layout(&root, "codex.cmd")?;
+
+        let command = command_from_codex_path(cmd)?;
+
+        assert_eq!(command.program, node);
+        assert_eq!(command.args, vec![script.into_os_string()]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_path_with_pathext_without_shell_process() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = test_root("path");
+        std::fs::create_dir_all(&root)?;
+        let executable = root.join("codex.EXE");
+        std::fs::write(&executable, "")?;
+
+        let found = find_on_path_in("codex", vec![root.clone()], Some(OsStr::new(".EXE;.CMD")));
+
+        assert_eq!(found, Some(executable));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unknown_wrapper_scripts() -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("unknown-wrapper");
+        std::fs::create_dir_all(&root)?;
+        let cmd = root.join("codex.cmd");
+        let ps1 = root.join("codex.ps1");
+        std::fs::write(&cmd, "")?;
+        std::fs::write(&ps1, "")?;
+
+        let cmd_error = command_from_codex_path(cmd).expect_err("unknown cmd should be rejected");
+        let ps1_error = command_from_codex_path(ps1).expect_err("ps1 should be rejected");
+
+        assert!(cmd_error.to_string().contains("wrapper scripts"));
+        assert!(ps1_error.to_string().contains("wrapper scripts"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_codex_cmd_with_spaces_and_uppercase_extension()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("path with spaces");
+        let (cmd, node, script) = create_codex_layout(&root, "CODEX.CMD")?;
+
+        let command = command_from_codex_path(cmd)?;
+
+        assert_eq!(command.program, node);
+        assert_eq!(command.args, vec![script.into_os_string()]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn caches_resolved_codex_command() -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("cache");
+        let (cmd, node, script) = create_codex_layout(&root, "codex.cmd")?;
+        let client = CodexAppServerClient {
+            command_override: Some(cmd),
+            resolved_command: Arc::new(Mutex::new(None)),
+        };
+
+        let first = client.resolve_codex_command()?;
+        std::fs::remove_file(&script)?;
+        let second = client.resolve_codex_command()?;
+
+        assert_eq!(first, second);
+        assert_eq!(second.program, node);
+        assert_eq!(second.args, vec![script.into_os_string()]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "codex-win-widget-test-{name}-{}-{suffix}",
+            std::process::id()
+        ))
+    }
+
+    fn create_codex_layout(
+        root: &Path,
+        cmd_name: &str,
+    ) -> Result<(PathBuf, PathBuf, PathBuf), Box<dyn std::error::Error>> {
         let bin = root
             .join("node_modules")
             .join("@openai")
             .join("codex")
             .join("bin");
         std::fs::create_dir_all(&bin)?;
-        let cmd = root.join("codex.cmd");
+        let cmd = root.join(cmd_name);
         let node = root.join("node.exe");
         let script = bin.join("codex.js");
         std::fs::write(&cmd, "")?;
         std::fs::write(&node, "")?;
         std::fs::write(&script, "")?;
-
-        let command = command_from_codex_path(cmd);
-
-        assert_eq!(command.program, node);
-        assert_eq!(command.args, vec![script.into_os_string()]);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
+        Ok((cmd, node, script))
     }
 
     #[test]
