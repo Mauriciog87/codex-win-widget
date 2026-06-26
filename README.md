@@ -1,19 +1,19 @@
 # Codex Win Widget
 
-Codex Win Widget is a small Windows tray app that shows your remaining Codex limit from the taskbar.
+Codex Win Widget is a small Windows tray app that shows your remaining Codex limits from the taskbar.
 
-It was built to feel like a native Windows flyout, not like a separate dashboard. Click the tray icon and a compact panel opens above the taskbar with the current remaining percentage, used percentage, reset time, credits, and token usage. Move the mouse away and it disappears.
+It was built to feel like a native Windows flyout, not like a separate dashboard. Click the tray icon and a compact panel opens above the taskbar with the current remaining percentage, weekly remaining percentage, used percentage, reset time, credits, and token usage. Move the mouse away and it disappears.
 
 ## What it does
 
 - Shows the current Codex limit as a tray icon.
 - Opens a native-looking flyout from the taskbar.
 - Puts the remaining percentage first, because that is the number you usually need.
-- Shows used percentage, reset time, credits, daily tokens, lifetime tokens, and streak when Codex provides those values.
+- Shows weekly remaining, used percentage, reset time, credits, daily tokens, lifetime tokens, and streak when Codex provides those values.
 - Refreshes automatically every 60 seconds.
 - Uses a 60-second in-memory cache, so opening the panel repeatedly does not keep calling Codex.
-- Avoids the visible `cmd.exe` flash by bypassing the npm `codex.cmd` wrapper when it can resolve the underlying `codex.js` script.
-- Provides a right-click menu for refresh, opening Codex, copying the current status, and quitting the app.
+- Avoids the visible console flash by resolving Codex in-process and skipping shell wrappers when it can launch the underlying `codex.js` script directly.
+- Provides a right-click menu for refresh, opening Codex, copying the current status, starting with Windows, and quitting the app.
 
 ## Trademark and affiliation
 
@@ -87,7 +87,9 @@ By default, the widget looks for Codex in this order:
 2. `codex.exe`
 3. `codex`
 
-If `codex.cmd` comes from an npm install, the widget tries to skip the batch file and launch Node directly with the installed Codex script. That avoids the short console window that Windows normally shows when a batch file starts.
+The lookup is done inside the widget. It does not call `where.exe`, `cmd.exe`, PowerShell, or another helper process just to find Codex.
+
+If `codex.cmd` comes from an npm install, the widget skips the batch file and launches Node directly with the installed Codex script. That avoids the short console window that Windows normally shows when a batch file starts. The resolved command is cached, so later refreshes do not repeat the PATH scan.
 
 You can point the widget at a specific Codex command with:
 
@@ -96,13 +98,19 @@ $env:CODEX_WIN_WIDGET_CODEX = "C:\Users\you\AppData\Roaming\npm\codex.cmd"
 .\target\release\codex-win-widget.exe
 ```
 
-The override can point to `codex.cmd`, `codex.exe`, or another compatible Codex launcher.
+The override can point to:
+
+- `codex.cmd`, when it is the npm wrapper next to `node_modules\@openai\codex\bin\codex.js`.
+- `codex.exe`, when you have a native executable launcher.
+- `codex.js`, when you want the widget to launch the Codex script through `node.exe`.
+
+The widget does not run unknown `.cmd`, `.bat`, or `.ps1` wrappers directly. If the wrapper layout is not recognized, the flyout shows an error instead of opening a flashing shell window.
 
 ## How it works
 
 The project is intentionally small:
 
-- `src/app_server.rs` starts `codex app-server`, sends the account and rate-limit requests over stdin, and reads JSON responses from stdout.
+- `src/app_server.rs` resolves Codex without shell helpers, starts `codex app-server`, sends the account and rate-limit requests over stdin, and reads JSON responses from stdout.
 - `src/model.rs` turns Codex account, limit, credit, and usage data into the compact view model used by the tray and flyout.
 - `src/native.rs` owns the Win32 tray icon, popup window, drawing code, clipboard integration, menu actions, refresh timer, and mouse-leave behavior.
 - `src/main.rs` keeps the binary Windows-only.
@@ -118,6 +126,8 @@ The widget refreshes in three situations:
 - When you choose `Refresh now`.
 
 Opening the flyout also asks for data, but it respects the 60-second cache. If the last refresh is still fresh, the panel opens immediately with the cached snapshot.
+
+The Codex command itself is resolved once per app session and reused after that. This keeps refreshes quiet and avoids repeating PATH work every time the panel opens.
 
 ## Development checks
 
