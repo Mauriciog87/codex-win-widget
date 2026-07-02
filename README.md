@@ -1,5 +1,8 @@
 # Codex Win Widget
 
+<img width="368" height="343" alt="imagen" src="https://github.com/user-attachments/assets/5ccf3c4a-416e-4248-bda5-5306209ce586" />
+
+
 Codex Win Widget is a small Windows tray app that shows your remaining Codex limits from the taskbar.
 
 It was built to feel like a native Windows flyout, not like a separate dashboard. Click the tray icon and a compact panel opens above the taskbar with the current remaining percentage, weekly remaining percentage, used percentage, reset time, credits, and token usage. Move the mouse away and it disappears.
