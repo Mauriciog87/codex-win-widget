@@ -1,7 +1,6 @@
 # Codex Win Widget
 
-<img width="368" height="343" alt="imagen" src="https://github.com/user-attachments/assets/5ccf3c4a-416e-4248-bda5-5306209ce586" />
-
+<img width="364" height="227" alt="imagen" src="https://github.com/user-attachments/assets/d0643542-ed98-4a07-a9dd-d237f51f051d" />
 
 Codex Win Widget is a small Windows tray app that shows your remaining Codex limits from the taskbar.
 
